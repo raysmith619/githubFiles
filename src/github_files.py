@@ -16,13 +16,13 @@ github_files -- List / Investigate GitHub repositiory files
 import sys
 import os
 import datetime
+from datetime import timezone
 from github import Github
 from github import InputGitTreeElement
-import getpass
-import traceback
-
+from getpass import getpass
 from optparse import OptionParser
 import path
+import traceback
 
 __all__ = []
 __version__ = 0.1
@@ -88,7 +88,6 @@ class CommittedFiles:
         self.branchName = branchName
         self.verbose = verbose
         self.fileDict = {};                 # Stored by path : CommittedFile
-        self.fileByNameDict = {};           # Stored by name : CommittedFile
         self.nFile = 0
         self.nDated = 0                     # Count of dated
         """
@@ -127,21 +126,16 @@ class CommittedFiles:
                     print("All %d files have commit dates" % self.nFile)
                     break
                 
-            if self.verbose > 0:
+            if self.verbose > 1:
                 cod = obj_desc(commit)
                 print("\ncommit %d" % (nshow))
                 cod.descs("author", "comments_url", "commit", "committer", "tree", "url")
             git_commit = commit.commit
-            git_author = git_commit.committer
-            commit_date = git_author.date
-            comments = commit.get_comments()
-            comment_str = ""
-            for comment in comments:
-                if comment_str != "":
-                    comment_str += "\n"
-                comment_str += comment
+            git_committer = git_commit.committer
+            commit_date = git_committer.date
+            comment_str = git_commit.message
             if self.verbose > 0:
-                print("commit: %s %s %" % (commit_date, git_author, comment_str))
+                print("commit %d: %s %s %s" % (nshow, commit_date, git_committer.name, comment_str))
             commit_files = commit.files
             for commit_file in commit_files:
                 commit_file_name = commit_file.filename
@@ -156,7 +150,7 @@ class CommittedFiles:
                 file = self.fileEntry(key=key)
                 if file == None:
                     print("commit %d: file %s(%s) is not in stored files - ignored" % (nshow, path, commit_file_name))
-                    print("    %s %s %s" % (commit_date, git_author, comment_str))
+                    print("    %s %s %s" % (commit_date, git_committer, comment_str))
                     continue
  
                 if file.date is not None:
@@ -171,7 +165,19 @@ class CommittedFiles:
                 self.nDated += 1
                 if self.verbose > 0:
                     print("%s (%s) date: %s   nDate: %d of %d" % (file.fileName, file.filePath, file.date, self.nDated, self.nFile))
-                    
+        
+        n_undated = self.nFile-self.nDated            
+        if self.nDated < self.nFile:
+            print("%d files have no commit dates" % n_undated)
+            for key in self.fileDict:
+                file = self.fileEntry(key=key)
+                if file is None:
+                    print("No entry for key=%s" % key)
+                fileDate = file.date
+                if fileDate is None:
+                    fileName = file.fileName
+                    filePath = file.filePath
+                    print("    %s (%s)" % (fileName, filePath))
                 
                          
     """
@@ -240,16 +246,35 @@ class CommittedFiles:
 
 
 """
+repo_date to local date string
+"""
+def repoDateToLocalStr(repo_date):
+    repo_time = repo_date.replace(tzinfo=timezone.utc).timestamp()                
+    repo_date_str = datetime.datetime.fromtimestamp(repo_time)
+    return repo_date_str
+
+"""
+repo date to local time stamp
+"""
+def repoDateToLocalTime(repo_date):
+    repo_time = repo_date.replace(tzinfo=timezone.utc).timestamp()                
+    return repo_time
+ 
+    
+"""    
 Commit list from file, base on opts settings
 """
-def commit_files(repo, news, branch=None):
+def commit_files(repo, local_file_dir, news, branch=None):
     changed_files = []
     if branch is None:
         branch = "master"
     print("branch: %s" % branch)
-    print("Commit file list in %s" % (news))
+    new_file_name = os.path.abspath(news)
+    print("Commit file list in %s" % (new_file_name))
     with open(news) as fin:
-        changed_files = fin.readlines()
+        for line in fin.readlines():
+            line = line.rstrip()      # May have trailing "\"
+            changed_files.append(line)
     fin.close()
     print("Changed files:")
     for file in changed_files:
@@ -268,14 +293,27 @@ def commit_files(repo, news, branch=None):
         print("No commits")
         return
     
-    commit_list(repo, changed_files, branchName=branch, commit_message=commit_message)
+    commit_list(repo, local_file_dir, changed_files, branchName=branch, commit_message=commit_message)
+    print("Looking at latest commit")
+    repo_branch = repo.get_branch(branch)
+    commit = repo_branch.commit
+    git_commit = commit.commit
+    git_committer = git_commit.committer
+    repo_date = git_committer.date
+    repo_date_str = repoDateToLocalStr(repo_date)
+    comment_str = git_commit.message
+    print("commit %s %s %s" % (repo_date_str, git_committer.name, comment_str))
+    commit_files = commit.files
+    for commit_file in commit_files:
+        commit_file_name = commit_file.filename
+        print("    %s" % commit_file_name)
 
 
 """
 Commit list of local files to repository
 """
 import base64
-def commit_list(repo, localFiles, branchName=None, commit_message=None):
+def commit_list(repo, local_file_dir, localFiles, branchName=None, commit_message=None):
     if branchName is None:
         branchName = 'master'
     if commit_message is None:
@@ -284,12 +322,14 @@ def commit_list(repo, localFiles, branchName=None, commit_message=None):
     master_sha = master_ref.object.sha
     base_tree = repo.get_git_tree(master_sha)
     element_list = list()
+    dir_path_len = len(local_file_dir)
     for local_file in localFiles:
         with open(local_file, 'r') as input_file:
             data = input_file.read()
         if local_file.endswith('.png'):
             data = base64.b64encode(data)
-        element = InputGitTreeElement(local_file, '100644', 'blob', content=data)
+        repo_path = local_file[dir_path_len+1:]
+        element = InputGitTreeElement(repo_path, '100644', 'blob', content=data)
         element_list.append(element)
     tree = repo.create_git_tree(element_list, base_tree)
     parent = repo.get_git_commit(master_sha)
@@ -458,16 +498,22 @@ def main(argv=None):
         else by token, if provided
         else by token in TOKENFILE.txt
         """
+        tokenfile = "TOKENFILE.txt";
+        tokenfile = os.path.join("..", tokenfile)
         if (opts.token):
             gH = Github(login_or_token=opts.token)
         elif (opts.user):
             if not opts.password:
-                opts.password = getpass.getpass()                
+                opts.password = getpass()                
             gH = Github(opts.user, opts.password)
-        else:
-            ftok = open('TOKENFILE.txt', "r")
+        elif os.path.exists(tokenfile): 
+            ftok = open(tokenfile, "r")
             filetoken = ftok.read()
             gH = Github(login_or_token=filetoken)
+        else:
+            user = input("Username:")
+            password = getpass()
+            gH = Github(user, password)
         
         if (not gH):
             raise Exception("Can't get GitHub")  
@@ -481,8 +527,16 @@ def main(argv=None):
         repo = user.get_repo(opts.repo)
         print("Got repo[%s]" % repo.full_name)
         branches = repo.get_branches()
-        print("branches: %s" % (branches))
-        branch_name = opts.branch 
+        branch_names = []
+        for branch in branches:
+            branch_names.append(branch.name)
+        branches_str = ", ".join(branch_names)
+        print("branches: %s" % (branches_str))
+        branch_name = opts.branch
+        if not branch_name in branch_names:
+            print("branch name: %s is not in your branches: %s" % (branch_name, branches_str))
+            sys.exit(1)
+            
         default_branch = repo.default_branch
         print("default branch: %s" % default_branch)
         if branch_name is None:
@@ -490,12 +544,6 @@ def main(argv=None):
         print("Using branch: %s" % branch_name)
         branch = repo.get_branch(branch_name)
         branch_commit = branch.commit
-        
-        if (opts.commit):
-            commit_files(repo, opts.newfile, branch=opts.branch)        # Just commit from new file list
-            print("Commit Done")
-            exit(0)
-            
             
         local_files_spec = os.path.join(opts.localFiles, opts.repo)
         local_file_dir = os.path.abspath(local_files_spec)
@@ -504,6 +552,12 @@ def main(argv=None):
             local_file_dir = lsrc
             print("Using \"src\" sub directory for files")
         print("Local files: %s" % local_file_dir)
+        
+        if (opts.commit):
+            commit_files(repo, local_file_dir, opts.newfile, branch=opts.branch)        # Just commit from new file list
+            print("Commit Done")
+            exit(0)
+            
         if opts.fullScan:
             detailed_scan()
         cF = CommittedFiles(repo, verbose=opts.verbose)
@@ -533,22 +587,27 @@ def main(argv=None):
                     print("%s not in repository ==> New" % rpath)
                     changed_files.append(lpath)     # Add to list
                     continue
-                
-                ltime = datetime.datetime.fromtimestamp(os.path.getmtime(lpath))
-                repo_time = fentry.date
+
+                repo_date = fentry.date
+                repo_date_str = repoDateToLocalStr(repo_date)
+                repo_time = repoDateToLocalTime(repo_date)
+                ltime = os.path.getmtime(lpath)
+                ltime_str = datetime.datetime.fromtimestamp(ltime)
                 if opts.verbose > 0:
-                    print("%s %s repo: '%s'" % (rpath, ltime, repo_time))
+                    print("%s %s repo: '%s'" % (rpath, ltime_str, repo_date_str))
                 #lfile = datetime.datetime.strptime(linx_file_dtime[:-3], '%Y-%m-%d_%H:%M:%S.%f')
                 if ltime > repo_time:
-                    print("%s local is newer %s than repo %s" % (rpath, ltime, repo_time))
+                    print("%s local is newer %s than repo %s" % (rpath, ltime_str, repo_date_str))
                     changed_files.append(lpath)     # Add to list
         if len(changed_files) > 0:
-            commit_list_file = opts.newfile
+            commit_list_file = os.path.abspath(opts.newfile)
+            print("Changed file list is in %s" % commit_list_file)
             fout = open(commit_list_file, 'w')
-            fout.writelines(changed_files)
+            out_str = "\n".join(changed_files)
+            fout.write(out_str)
             fout.close()
             
-            commit_files(repo, opts.newfile, branch=opts.branch)    
+            commit_files(repo, local_file_dir, opts.newfile, branch=opts.branch)        # Just commit from new file list
         else:
             print("No new or changed files")
             
